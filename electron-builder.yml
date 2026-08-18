@@ -1,0 +1,26 @@
+appId: com.snbtakahashi.timetableapp
+productName: TimeTable
+directories:
+  output: dist
+afterPack: scripts/after-pack.cjs
+files:
+  - electron/**/*
+  - package.json
+  - "!node_modules"
+extraResources:
+  # electron-builder applies its default ignore rules (which strip
+  # node_modules) to extraResources too unless overridden — an explicit
+  # "**/*" filter forces the whole standalone tree, node_modules included,
+  # to be copied verbatim (needed for the `next` package itself and the
+  # Prisma native engine).
+  - from: .next/standalone
+    to: app
+    filter:
+      - "**/*"
+  - from: resources/template.db
+    to: template.db
+win:
+  target: nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

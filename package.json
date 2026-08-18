@@ -1,0 +1,44 @@
+{
+  "name": "timetable-app",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "dev:next": "next dev --webpack -p 3050",
+    "dev:electron": "wait-on http://127.0.0.1:3050 && cross-env ELECTRON_START_URL=http://127.0.0.1:3050 electron .",
+    "dev": "concurrently -k \"npm:dev:next\" \"npm:dev:electron\"",
+    "lint": "eslint",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:build-template": "node scripts/build-template-db.mjs",
+    "build:next": "prisma generate && next build",
+    "postbuild:next": "node scripts/copy-standalone-assets.mjs",
+    "build": "npm run build:next",
+    "dist": "npm run build && electron-builder --win nsis"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "next": "16.3.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "concurrently": "^10.0.5",
+    "cross-env": "^10.1.0",
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.1",
+    "prisma": "^6.19.3",
+    "tailwindcss": "^4",
+    "tsx": "^4.23.12",
+    "typescript": "^5",
+    "wait-on": "^9.1.0"
+  }
+}

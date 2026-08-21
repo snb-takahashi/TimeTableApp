@@ -15,12 +15,17 @@ const POLL_INTERVAL_MS = 400;
 function GenerateProgress({
   onPendingChange,
   onRequestConfirm,
+  cancelRequested,
+  onCancel,
 }: {
   onPendingChange: (pending: boolean) => void;
   onRequestConfirm: () => void;
+  cancelRequested: boolean;
+  onCancel: () => void;
 }) {
   const { pending } = useFormStatus();
   const [percent, setPercent] = useState(0);
+  const [attempt, setAttempt] = useState(1);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -43,7 +48,11 @@ function GenerateProgress({
     const poll = async () => {
       const res = await fetch("/api/generation-progress", { cache: "no-store" });
       const state: GenerationState = await res.json();
-      if (!cancelled && state.status === "running") setPercent(state.percent);
+      if (cancelled) return;
+      if (state.status === "running") {
+        setPercent(state.percent);
+        setAttempt(state.attempt);
+      }
     };
     poll();
     intervalRef.current = setInterval(poll, POLL_INTERVAL_MS);
@@ -70,7 +79,18 @@ function GenerateProgress({
       <div className="w-32 h-2 rounded bg-gray-200 overflow-hidden">
         <div className="h-full bg-blue-600 transition-all" style={{ width: `${percent}%` }} />
       </div>
-      <span className="text-gray-600 tabular-nums">{percent}%</span>
+      <span className="text-gray-600 tabular-nums">
+        {attempt > 1 ? `${attempt}回目 ` : ""}
+        {percent}%
+      </span>
+      <button
+        type="button"
+        onClick={onCancel}
+        disabled={cancelRequested}
+        className="cursor-pointer rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:cursor-default disabled:opacity-50"
+      >
+        {cancelRequested ? "キャンセル中..." : "キャンセル"}
+      </button>
     </div>
   );
 }
@@ -90,7 +110,13 @@ export function AutoGenerateButton({
 }) {
   const [isRunning, setIsRunning] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [cancelRequested, setCancelRequested] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
+
+  async function handleCancel() {
+    setCancelRequested(true);
+    await fetch("/api/generation-cancel", { method: "POST" });
+  }
 
   return (
     <>
@@ -109,6 +135,8 @@ export function AutoGenerateButton({
             <GenerateProgress
               onPendingChange={setIsRunning}
               onRequestConfirm={() => setShowConfirm(true)}
+              cancelRequested={cancelRequested}
+              onCancel={handleCancel}
             />
           </form>
         </div>
@@ -148,6 +176,7 @@ export function AutoGenerateButton({
                 type="button"
                 onClick={() => {
                   setShowConfirm(false);
+                  setCancelRequested(false);
                   formRef.current?.requestSubmit();
                 }}
                 className="cursor-pointer rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700"

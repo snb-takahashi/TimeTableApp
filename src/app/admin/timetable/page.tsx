@@ -4,7 +4,11 @@ import { prisma } from "@/lib/db";
 import { getDefaultOrganization } from "@/lib/org";
 import { checkConflicts } from "@/lib/conflicts";
 import { generateSchedule } from "@/lib/autoSchedule";
-import { setGenerationState } from "@/lib/generationProgress";
+import {
+  setGenerationState,
+  clearCancellation,
+  isCancellationRequested,
+} from "@/lib/generationProgress";
 import { ClassSelector } from "@/components/admin/ClassSelector";
 import { AutoGenerateButton } from "@/components/admin/AutoGenerateButton";
 import { DAY_LABELS, DAY_ORDER } from "@/lib/days";
@@ -35,16 +39,32 @@ async function assignEntry(formData: FormData) {
   redirect(`/admin/timetable?classId=${classGroupId}`);
 }
 
+// Upper bound on how many times a retryable failure is automatically
+// retried before giving up — protects against burning server resources
+// forever on a curriculum that's actually unsolvable in a way none of the
+// upfront feasibility checks caught (e.g. a room-capacity conflict).
+const MAX_AUTO_RETRIES = 50;
+
 async function runAutoGenerate(formData: FormData) {
   "use server";
   const classGroupId = String(formData.get("classGroupId") ?? "");
   const org = await getDefaultOrganization();
-  setGenerationState(org.id, { status: "running", percent: 0 });
-  const result = await generateSchedule(org.id, (percent) => {
-    setGenerationState(org.id, { status: "running", percent });
-  });
+  clearCancellation(org.id);
+
+  let attempt = 0;
+  let result: Awaited<ReturnType<typeof generateSchedule>>;
+  do {
+    attempt++;
+    setGenerationState(org.id, { status: "running", percent: 0, attempt });
+    result = await generateSchedule(
+      org.id,
+      (percent) => setGenerationState(org.id, { status: "running", percent, attempt }),
+      () => isCancellationRequested(org.id)
+    );
+  } while (!result.success && !result.cancelled && result.retryable && attempt < MAX_AUTO_RETRIES);
 
   revalidatePath("/admin/timetable");
+
   if (result.success) {
     setGenerationState(org.id, { status: "done" });
     const notes: string[] = [];
@@ -54,11 +74,24 @@ async function runAutoGenerate(formData: FormData) {
     if (result.relaxedTeacherContiguity) {
       notes.push("一部の非常勤教員はコマを連続・出勤日数最小にできず、通常どおりの配置になりました。");
     }
-    const message = `時間割を自動生成しました(${result.placedCount}コマ配置)。${notes.join("")}`;
+    const attemptNote = attempt > 1 ? `(${attempt}回目の試行で成功)` : "";
+    const message = `時間割を自動生成しました(${result.placedCount}コマ配置)${attemptNote}。${notes.join("")}`;
     redirect(`/admin/timetable?classId=${classGroupId}&notice=${encodeURIComponent(message)}`);
   }
-  setGenerationState(org.id, { status: "error", message: result.reason });
-  redirect(`/admin/timetable?classId=${classGroupId}&error=${encodeURIComponent(result.reason)}`);
+
+  if (result.cancelled) {
+    setGenerationState(org.id, { status: "cancelled" });
+    redirect(
+      `/admin/timetable?classId=${classGroupId}&notice=${encodeURIComponent("自動生成をキャンセルしました。")}`
+    );
+  }
+
+  const message =
+    result.retryable && attempt >= MAX_AUTO_RETRIES
+      ? `${MAX_AUTO_RETRIES}回自動的に再試行しましたが、${result.reason}`
+      : result.reason;
+  setGenerationState(org.id, { status: "error", message });
+  redirect(`/admin/timetable?classId=${classGroupId}&error=${encodeURIComponent(message)}`);
 }
 
 async function removeEntry(formData: FormData) {

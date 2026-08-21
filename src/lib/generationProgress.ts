@@ -7,16 +7,21 @@
 // poll endpoint.
 export type GenerationState =
   | { status: "idle" }
-  | { status: "running"; percent: number }
+  | { status: "running"; percent: number; attempt: number }
   | { status: "done" }
+  | { status: "cancelled" }
   | { status: "error"; message: string };
 
 const globalForProgress = globalThis as unknown as {
   generationProgressStore: Map<string, GenerationState> | undefined;
+  generationCancelStore: Set<string> | undefined;
 };
 
 const store = globalForProgress.generationProgressStore ?? new Map<string, GenerationState>();
 globalForProgress.generationProgressStore = store;
+
+const cancelStore = globalForProgress.generationCancelStore ?? new Set<string>();
+globalForProgress.generationCancelStore = cancelStore;
 
 export function setGenerationState(organizationId: string, state: GenerationState) {
   store.set(organizationId, state);
@@ -24,4 +29,16 @@ export function setGenerationState(organizationId: string, state: GenerationStat
 
 export function getGenerationState(organizationId: string): GenerationState {
   return store.get(organizationId) ?? { status: "idle" };
+}
+
+export function requestCancellation(organizationId: string) {
+  cancelStore.add(organizationId);
+}
+
+export function clearCancellation(organizationId: string) {
+  cancelStore.delete(organizationId);
+}
+
+export function isCancellationRequested(organizationId: string): boolean {
+  return cancelStore.has(organizationId);
 }

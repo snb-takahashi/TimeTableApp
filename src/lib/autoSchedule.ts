@@ -13,7 +13,13 @@ type Placement = { lesson: Lesson; slotId: string; roomId: string };
 
 export type GenerateResult =
   | { success: true; placedCount: number; relaxedDailyCap: boolean; relaxedTeacherContiguity: boolean }
-  | { success: false; reason: string };
+  | { success: false; cancelled: true }
+  // `retryable` distinguishes cases a fresh random shuffle could still
+  // solve (backtracking exhausted its budget) from cases that are
+  // structurally impossible no matter how placements are tried (missing
+  // registrations, or checkFeasibility()'s capacity checks) — callers use
+  // it to decide whether auto-retrying is worth attempting.
+  | { success: false; cancelled: false; reason: string; retryable: boolean };
 
 const MAX_BACKTRACK_STEPS = 20_000;
 const MAX_PERIODS_PER_DAY = 3;
@@ -58,7 +64,8 @@ const STRICT_MIN_PER_DAY = 2;
  */
 export async function generateSchedule(
   organizationId: string,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  isCancelled?: () => boolean
 ): Promise<GenerateResult> {
   const [requirements, timeSlots, rooms, teachers, unavailability] = await Promise.all([
     prisma.curriculumRequirement.findMany({ where: { organizationId } }),
@@ -69,13 +76,23 @@ export async function generateSchedule(
   ]);
 
   if (requirements.length === 0) {
-    return { success: false, reason: "カリキュラム(担当教員・週コマ数)が登録されていません。" };
+    return {
+      success: false,
+      cancelled: false,
+      reason: "カリキュラム(担当教員・週コマ数)が登録されていません。",
+      retryable: false,
+    };
   }
   if (timeSlots.length === 0) {
-    return { success: false, reason: "コマ(時限)が登録されていません。" };
+    return {
+      success: false,
+      cancelled: false,
+      reason: "コマ(時限)が登録されていません。",
+      retryable: false,
+    };
   }
   if (rooms.length === 0) {
-    return { success: false, reason: "教室が登録されていません。" };
+    return { success: false, cancelled: false, reason: "教室が登録されていません。", retryable: false };
   }
 
   const partTimeTeacherIds = new Set(teachers.filter((t) => t.isPartTime).map((t) => t.id));
@@ -99,7 +116,7 @@ export async function generateSchedule(
 
   const feasibilityError = checkFeasibility(lessons, timeSlots, teacherBlockedCount);
   if (feasibilityError) {
-    return { success: false, reason: feasibilityError };
+    return { success: false, cancelled: false, reason: feasibilityError, retryable: false };
   }
 
   onProgress?.(0);
@@ -164,6 +181,7 @@ export async function generateSchedule(
   ): Promise<Placement[] | null> {
     const attempts = strictClassIds.size > 0 ? MAX_STRICT_VALIDATION_ATTEMPTS : MAX_ATTEMPTS_PER_PASS;
     for (let attempt = 0; attempt < attempts; attempt++) {
+      if (isCancelled?.()) return null;
       const shuffled = shuffle([...lessons]);
       const orderedLessons = shuffled
         .map((lesson, i) => ({ lesson, i }))
@@ -185,7 +203,8 @@ export async function generateSchedule(
         maxPeriodsPerDay,
         partTimeTeacherIds,
         enforceTeacherContiguity,
-        strictClassIds
+        strictClassIds,
+        isCancelled
       );
 
       attemptsDone++;
@@ -242,17 +261,23 @@ export async function generateSchedule(
   }
 
   if (!assignment) {
+    if (isCancelled?.()) {
+      return { success: false, cancelled: true };
+    }
     // Unlike the checkFeasibility() cases above (which are structurally
     // impossible no matter how placements are tried), reaching here only
     // means every random ordering tried within this call's retry budget
     // failed — a different shuffle on a later call can still succeed, so
-    // the message says so rather than implying the settings must change.
+    // this is marked retryable (the caller auto-retries on a fresh call
+    // rather than this message telling the user to click again manually).
     return {
       success: false,
+      cancelled: false,
+      retryable: true,
       reason:
         strictClassIds.size > 0
-          ? "制約を満たす時間割を作成できませんでした。特に週15コマ以内のクラスは1日2〜3コマ厳守のため、教員の空きコマ・教室数・週コマ数の設定を見直してください。なお、設定に問題がない場合でも、組み合わせによっては再度「自動生成」を実行すると成功することがあります。"
-          : "制約を満たす時間割を作成できませんでした。教員の空きコマ・教室数・週コマ数の設定を見直してください。なお、設定に問題がない場合でも、組み合わせによっては再度「自動生成」を実行すると成功することがあります。",
+          ? "制約を満たす時間割を作成できませんでした。特に週15コマ以内のクラスは1日2〜3コマ厳守のため、教員の空きコマ・教室数・週コマ数の設定を見直してください。"
+          : "制約を満たす時間割を作成できませんでした。教員の空きコマ・教室数・週コマ数の設定を見直してください。",
     };
   }
 
@@ -317,7 +342,8 @@ async function solve(
   maxPeriodsPerDay: number,
   partTimeTeacherIds: Set<string>,
   enforceTeacherContiguity: boolean,
-  strictClassIds: Set<string>
+  strictClassIds: Set<string>,
+  isCancelled?: () => boolean
 ): Promise<Placement[] | null> {
   const dayIndex = new Map(DAY_ORDER.map((d, i) => [d, i]));
 
@@ -345,6 +371,7 @@ async function solve(
     if (++steps > MAX_BACKTRACK_STEPS) return false;
     if (steps % YIELD_EVERY_STEPS === 0) {
       await new Promise((resolve) => setImmediate(resolve));
+      if (isCancelled?.()) return false;
     }
 
     const lesson = orderedLessons[index];

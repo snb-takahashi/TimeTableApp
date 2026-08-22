@@ -68,7 +68,10 @@ export async function generateSchedule(
   isCancelled?: () => boolean
 ): Promise<GenerateResult> {
   const [requirements, timeSlots, rooms, teachers, unavailability] = await Promise.all([
-    prisma.curriculumRequirement.findMany({ where: { organizationId } }),
+    prisma.curriculumRequirement.findMany({
+      where: { organizationId },
+      include: { classGroup: true, subject: true, teacher: true },
+    }),
     prisma.timeSlot.findMany({ where: { organizationId } }),
     prisma.room.findMany({ where: { organizationId } }),
     prisma.teacher.findMany({ where: { organizationId } }),
@@ -114,7 +117,7 @@ export async function generateSchedule(
     teacherBlockedCount.set(u.teacherId, (teacherBlockedCount.get(u.teacherId) ?? 0) + 1);
   }
 
-  const feasibilityError = checkFeasibility(lessons, timeSlots, teacherBlockedCount);
+  const feasibilityError = checkFeasibility(requirements, timeSlots, teacherBlockedCount);
   if (feasibilityError) {
     return { success: false, cancelled: false, reason: feasibilityError, retryable: false };
   }
@@ -503,30 +506,78 @@ async function solve(
   return (await backtrack(0)) ? assignment : null;
 }
 
+type RequirementWithNames = {
+  classGroupId: string;
+  teacherId: string;
+  periodsPerWeek: number;
+  classGroup: { name: string };
+  subject: { name: string };
+  teacher: { name: string };
+};
+
+// Reports every class/teacher whose week is structurally overbooked (not
+// just the first one found) with a class+subject breakdown, so the message
+// points straight at which curriculum row to adjust instead of leaving the
+// user to guess whether it's a class, subject, or teacher problem.
 function checkFeasibility(
-  lessons: Lesson[],
+  requirements: RequirementWithNames[],
   timeSlots: TimeSlot[],
   teacherBlockedCount: Map<string, number>
 ): string | null {
   const totalSlots = timeSlots.length;
-  const perClass = new Map<string, number>();
-  const perTeacher = new Map<string, number>();
 
-  for (const l of lessons) {
-    perClass.set(l.classGroupId, (perClass.get(l.classGroupId) ?? 0) + 1);
-    perTeacher.set(l.teacherId, (perTeacher.get(l.teacherId) ?? 0) + 1);
+  const perClass = new Map<string, { name: string; total: number; bySubject: Map<string, number> }>();
+  const perTeacher = new Map<
+    string,
+    { name: string; total: number; byClassSubject: Map<string, number> }
+  >();
+
+  for (const req of requirements) {
+    const classEntry = perClass.get(req.classGroupId) ?? {
+      name: req.classGroup.name,
+      total: 0,
+      bySubject: new Map<string, number>(),
+    };
+    classEntry.total += req.periodsPerWeek;
+    classEntry.bySubject.set(
+      req.subject.name,
+      (classEntry.bySubject.get(req.subject.name) ?? 0) + req.periodsPerWeek
+    );
+    perClass.set(req.classGroupId, classEntry);
+
+    const teacherEntry = perTeacher.get(req.teacherId) ?? {
+      name: req.teacher.name,
+      total: 0,
+      byClassSubject: new Map<string, number>(),
+    };
+    const label = `${req.classGroup.name}の${req.subject.name}`;
+    teacherEntry.total += req.periodsPerWeek;
+    teacherEntry.byClassSubject.set(
+      label,
+      (teacherEntry.byClassSubject.get(label) ?? 0) + req.periodsPerWeek
+    );
+    perTeacher.set(req.teacherId, teacherEntry);
   }
 
-  for (const count of perClass.values()) {
-    if (count > totalSlots) {
-      return `あるクラスの週の合計コマ数(${count})が、登録されているコマ数(${totalSlots})を超えています。`;
+  const problems: string[] = [];
+
+  for (const { name, total, bySubject } of perClass.values()) {
+    if (total > totalSlots) {
+      const breakdown = [...bySubject.entries()].map(([s, n]) => `${s}${n}コマ`).join("、");
+      problems.push(
+        `クラス「${name}」の週の合計コマ数(${total})が、登録されているコマ数(${totalSlots})を超えています(内訳: ${breakdown})。カリキュラムの週コマ数を見直してください。`
+      );
     }
   }
-  for (const [teacherId, count] of perTeacher) {
+  for (const [teacherId, { name, total, byClassSubject }] of perTeacher) {
     const free = totalSlots - (teacherBlockedCount.get(teacherId) ?? 0);
-    if (count > free) {
-      return `ある教員の週の合計担当コマ数(${count})が、その教員の空きコマ数(${free})を超えています。`;
+    if (total > free) {
+      const breakdown = [...byClassSubject.entries()].map(([cs, n]) => `${cs}${n}コマ`).join("、");
+      problems.push(
+        `教員「${name}」の週の合計担当コマ数(${total})が、空きコマ数(${free})を超えています(内訳: ${breakdown})。担当を減らすか、教員の「不可時間」設定を見直してください。`
+      );
     }
   }
-  return null;
+
+  return problems.length > 0 ? problems.join(" ") : null;
 }
